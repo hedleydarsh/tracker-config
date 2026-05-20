@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QLineEdit, QComboBox, QPushButton, QLabel,
     QHBoxLayout, QMessageBox
 )
-from PySide6.QtCore import QThread, Signal
+from PySide6.QtCore import QThread, Signal, Qt
 from core.modem import Modem
 
 
@@ -34,7 +34,7 @@ class ConfigWidget(QWidget):
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
-        layout.setAlignment(0x0001)  # AlignTop
+        layout.setAlignment(Qt.AlignTop)
 
         # ── APN ──────────────────────────────────────────────────────
         apn_box = QGroupBox("APN / Dados")
