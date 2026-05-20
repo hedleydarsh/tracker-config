@@ -3,16 +3,41 @@ Config tab — set APN, SMSC, network mode, SMS storage, send test SMS.
 """
 
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QFormLayout, QGroupBox,
+    QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QGroupBox,
     QLineEdit, QComboBox, QPushButton, QLabel,
-    QHBoxLayout, QMessageBox
+    QMessageBox, QScrollArea, QFrame, QSizePolicy
 )
 from PySide6.QtCore import QThread, Signal, Qt
+from typing import Optional
 from core.modem import Modem
 
 
+# ── Presets ──────────────────────────────────────────────────────────────────
+
+APN_PRESETS = [
+    ("",                       "— Selecionar preset —"),
+    ("timbrasil.br",           "TIM Brasil"),
+    ("EM",                     "TIM M2M"),
+    ("claro.com.br",           "Claro"),
+    ("zap.vivo.com.br",        "Vivo"),
+    ("gprs.oi.com.br",         "Oi"),
+    ("em.MNC005.MCC295.GPRS",  "emnify (TrackPlus M2M)"),
+]
+
+SMSC_PRESETS = [
+    ("",               "— Selecionar preset —"),
+    ("+5511818110000", "TIM Brasil"),
+    ("+551181138200",  "TIM M2M (decodificado)"),
+    ("+5511986080808", "Claro"),
+    ("+5511913160005", "Vivo"),
+    ("+42379010570",   "emnify (TrackPlus M2M)"),
+]
+
+
+# ── Worker thread ─────────────────────────────────────────────────────────────
+
 class WorkerThread(QThread):
-    done   = Signal(bool, str)
+    done = Signal(bool, str)
 
     def __init__(self, fn):
         super().__init__()
@@ -21,197 +46,288 @@ class WorkerThread(QThread):
     def run(self):
         try:
             result = self._fn()
-            self.done.emit(True, str(result))
+            ok = result is not False
+            self.done.emit(ok, "" if ok else "Operação retornou falso")
         except Exception as e:
             self.done.emit(False, str(e))
 
 
+# ── Config widget ─────────────────────────────────────────────────────────────
+
 class ConfigWidget(QWidget):
     def __init__(self):
         super().__init__()
-        self.modem: Modem | None = None
+        self.modem: Optional[Modem] = None
+        self._worker: Optional[WorkerThread] = None
+        self._action_btns: list[QPushButton] = []
         self._setup_ui()
 
     def _setup_ui(self):
-        layout = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        outer.addWidget(scroll)
+
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
         layout.setAlignment(Qt.AlignTop)
+        scroll.setWidget(content)
 
-        # ── APN ──────────────────────────────────────────────────────
-        apn_box = QGroupBox("APN / Dados")
-        apn_form = QFormLayout(apn_box)
+        layout.addWidget(self._build_apn_box())
+        layout.addWidget(self._build_smsc_box())
+        layout.addWidget(self._build_network_box())
+        layout.addWidget(self._build_sms_box())
+        layout.addWidget(self._build_reset_box())
 
-        self.apn_input = QLineEdit()
-        self.apn_input.setPlaceholderText("ex: timbrasil.br")
-        apn_form.addRow("APN:", self.apn_input)
+        # ── Status bar ───────────────────────────────────────────────
+        self._status = QLabel("")
+        self._status.setStyleSheet("color:#6c757d; font-size:11px; padding:4px 12px;")
+        outer.addWidget(self._status)
 
-        self.apn_type = QComboBox()
-        self.apn_type.addItems(["IP", "IPV4V6"])
-        apn_form.addRow("Tipo:", self.apn_type)
+        self._set_buttons_enabled(False)
 
-        self.apn_btn = QPushButton("Aplicar APN")
-        self.apn_btn.clicked.connect(self._apply_apn)
-        self.apn_btn.setEnabled(False)
-        apn_form.addRow("", self.apn_btn)
-        layout.addWidget(apn_box)
+    # ── Box builders ──────────────────────────────────────────────────
 
-        # ── SMSC ─────────────────────────────────────────────────────
-        smsc_box = QGroupBox("SMSC (Central de SMS)")
-        smsc_form = QFormLayout(smsc_box)
-
-        self.smsc_input = QLineEdit()
-        self.smsc_input.setPlaceholderText("ex: +5511818110000")
-        smsc_form.addRow("SMSC:", self.smsc_input)
-
-        smsc_note = QLabel(
-            "⚠ Em módulos com firmware LSOFTSIM o AT+CSCA é bloqueado.\n"
-            "Use 'Enviar SMS de teste' para verificar via PDU."
+    def _box(self, title: str) -> tuple[QGroupBox, QFormLayout]:
+        box = QGroupBox(title)
+        box.setStyleSheet(
+            "QGroupBox { font-weight:600; border:1px solid #dee2e6; "
+            "border-radius:6px; margin-top:8px; padding:6px; }"
+            "QGroupBox::title { subcontrol-origin:margin; left:10px; }"
         )
-        smsc_note.setStyleSheet("color: #856404; font-size: 11px;")
-        smsc_note.setWordWrap(True)
-        smsc_form.addRow("", smsc_note)
+        return box, QFormLayout(box)
 
-        self.smsc_btn = QPushButton("Aplicar SMSC")
-        self.smsc_btn.clicked.connect(self._apply_smsc)
-        self.smsc_btn.setEnabled(False)
-        smsc_form.addRow("", self.smsc_btn)
-        layout.addWidget(smsc_box)
+    def _action_btn(self, label: str) -> QPushButton:
+        btn = QPushButton(label)
+        btn.setMinimumHeight(30)
+        self._action_btns.append(btn)
+        return btn
 
-        # ── Modo de rede ─────────────────────────────────────────────
-        net_box = QGroupBox("Modo de Rede")
-        net_form = QFormLayout(net_box)
+    def _build_apn_box(self) -> QGroupBox:
+        box, form = self._box("🌐  APN / Dados")
 
-        self.net_mode = QComboBox()
-        self.net_mode.addItem("Automático",  2)
-        self.net_mode.addItem("LTE only",   38)
-        self.net_mode.addItem("GSM only",   13)
-        self.net_mode.addItem("GSM + LTE",  51)
-        net_form.addRow("Modo:", self.net_mode)
+        self._apn_preset = QComboBox()
+        for val, label in APN_PRESETS:
+            self._apn_preset.addItem(label, val)
+        self._apn_preset.currentIndexChanged.connect(self._on_apn_preset)
+        form.addRow("Preset:", self._apn_preset)
 
-        self.net_btn = QPushButton("Aplicar modo")
-        self.net_btn.clicked.connect(self._apply_network_mode)
-        self.net_btn.setEnabled(False)
-        net_form.addRow("", self.net_btn)
-        layout.addWidget(net_box)
+        self._apn_input = QLineEdit()
+        self._apn_input.setPlaceholderText("ex: timbrasil.br")
+        form.addRow("APN:", self._apn_input)
 
-        # ── SMS ──────────────────────────────────────────────────────
-        sms_box = QGroupBox("SMS")
-        sms_form = QFormLayout(sms_box)
+        self._apn_type = QComboBox()
+        self._apn_type.addItems(["IP", "IPV4V6"])
+        form.addRow("Tipo:", self._apn_type)
 
-        self.sms_storage = QComboBox()
-        self.sms_storage.addItem("ME — Memória interna (180 slots)", "ME")
-        self.sms_storage.addItem("SM — SIM card (5-50 slots)",       "SM")
-        sms_form.addRow("Storage:", self.sms_storage)
+        btn = self._action_btn("Aplicar APN")
+        btn.clicked.connect(self._apply_apn)
+        form.addRow("", btn)
+        return box
 
-        self.sms_storage_btn = QPushButton("Aplicar storage")
-        self.sms_storage_btn.clicked.connect(self._apply_sms_storage)
-        self.sms_storage_btn.setEnabled(False)
-        sms_form.addRow("", self.sms_storage_btn)
+    def _build_smsc_box(self) -> QGroupBox:
+        box, form = self._box("✉️  SMSC (Central de SMS)")
 
-        sms_form.addRow(QLabel(""))
-        sms_form.addRow(QLabel("Teste de envio SMS (PDU com SMSC embutido):"))
+        self._smsc_preset = QComboBox()
+        for val, label in SMSC_PRESETS:
+            self._smsc_preset.addItem(label, val)
+        self._smsc_preset.currentIndexChanged.connect(self._on_smsc_preset)
+        form.addRow("Preset:", self._smsc_preset)
 
-        self.sms_dest = QLineEdit()
-        self.sms_dest.setPlaceholderText("+5511999999999")
-        sms_form.addRow("Destino:", self.sms_dest)
+        self._smsc_input = QLineEdit()
+        self._smsc_input.setPlaceholderText("ex: +5511818110000")
+        form.addRow("SMSC:", self._smsc_input)
 
-        self.sms_smsc_override = QLineEdit()
-        self.sms_smsc_override.setPlaceholderText("SMSC para o PDU (ex: +551181138200)")
-        sms_form.addRow("SMSC PDU:", self.sms_smsc_override)
+        note = QLabel(
+            "⚠  Firmware LSOFTSIM bloqueia AT+CSCA. "
+            "Use 'Enviar SMS de teste' para validar via PDU."
+        )
+        note.setStyleSheet("color:#856404; font-size:11px;")
+        note.setWordWrap(True)
+        form.addRow("", note)
 
-        self.sms_send_btn = QPushButton("Enviar SMS de teste")
-        self.sms_send_btn.clicked.connect(self._send_test_sms)
-        self.sms_send_btn.setEnabled(False)
-        sms_form.addRow("", self.sms_send_btn)
+        btn = self._action_btn("Aplicar SMSC")
+        btn.clicked.connect(self._apply_smsc)
+        form.addRow("", btn)
+        return box
 
-        layout.addWidget(sms_box)
+    def _build_network_box(self) -> QGroupBox:
+        box, form = self._box("📡  Modo de Rede")
 
-        # ── Reset ────────────────────────────────────────────────────
-        rst_box = QGroupBox("Reset")
-        rst_layout = QHBoxLayout(rst_box)
+        self._net_mode = QComboBox()
+        self._net_mode.addItem("Automático",  2)
+        self._net_mode.addItem("LTE only",   38)
+        self._net_mode.addItem("GSM only",   13)
+        self._net_mode.addItem("GSM + LTE",  51)
+        form.addRow("Modo:", self._net_mode)
 
-        self.rf_reset_btn = QPushButton("Reset de Rádio (CFUN)")
-        self.rf_reset_btn.clicked.connect(self._rf_reset)
-        self.rf_reset_btn.setEnabled(False)
-        rst_layout.addWidget(self.rf_reset_btn)
+        btn = self._action_btn("Aplicar modo")
+        btn.clicked.connect(self._apply_network_mode)
+        form.addRow("", btn)
+        return box
 
-        self.factory_btn = QPushButton("Factory Reset (AT&F)")
-        self.factory_btn.clicked.connect(self._factory_reset)
-        self.factory_btn.setEnabled(False)
-        rst_layout.addWidget(self.factory_btn)
+    def _build_sms_box(self) -> QGroupBox:
+        box, form = self._box("💬  SMS")
 
-        layout.addWidget(rst_box)
-        layout.addStretch()
+        self._sms_storage = QComboBox()
+        self._sms_storage.addItem("ME — Memória interna (180 slots)", "ME")
+        self._sms_storage.addItem("SM — SIM card (5-50 slots)",       "SM")
+        form.addRow("Storage:", self._sms_storage)
 
-    def set_modem(self, modem: Modem | None):
+        btn_storage = self._action_btn("Aplicar storage")
+        btn_storage.clicked.connect(self._apply_sms_storage)
+        form.addRow("", btn_storage)
+
+        form.addRow(_separator())
+        form.addRow(QLabel("<b>Teste de envio SMS</b> (PDU com SMSC embutido — bypassa bug UTF-16):"))
+
+        self._sms_dest = QLineEdit()
+        self._sms_dest.setPlaceholderText("+5511999999999")
+        form.addRow("Destino:", self._sms_dest)
+
+        self._sms_smsc = QLineEdit()
+        self._sms_smsc.setPlaceholderText("SMSC para o PDU  ex: +551181138200")
+        form.addRow("SMSC PDU:", self._sms_smsc)
+
+        btn_send = self._action_btn("▶  Enviar SMS de teste")
+        btn_send.clicked.connect(self._send_test_sms)
+        form.addRow("", btn_send)
+        return box
+
+    def _build_reset_box(self) -> QGroupBox:
+        box, form = self._box("⚙️  Reset")
+        row = QHBoxLayout()
+
+        btn_rf = self._action_btn("Reset de Rádio (CFUN)")
+        btn_rf.clicked.connect(self._rf_reset)
+        row.addWidget(btn_rf)
+
+        btn_f = self._action_btn("Factory Reset (AT&F)")
+        btn_f.clicked.connect(self._factory_reset)
+        row.addWidget(btn_f)
+
+        form.addRow(row)
+        return box
+
+    # ── Public API ────────────────────────────────────────────────────
+
+    def set_modem(self, modem: Optional[Modem]):
         self.modem = modem
-        enabled = modem is not None
-        for btn in [self.apn_btn, self.smsc_btn, self.net_btn,
-                    self.sms_storage_btn, self.sms_send_btn,
-                    self.rf_reset_btn, self.factory_btn]:
-            btn.setEnabled(enabled)
+        self._set_buttons_enabled(modem is not None)
+        if not modem:
+            self._status.setText("")
 
-    def _run_worker(self, fn, success_msg: str):
-        self.setEnabled(False)
-        self._worker = WorkerThread(fn)
-        def on_done(ok, msg):
-            self.setEnabled(True)
-            if ok:
-                QMessageBox.information(self, "Sucesso", success_msg)
-            else:
-                QMessageBox.critical(self, "Erro", msg)
-        self._worker.done.connect(on_done)
-        self._worker.start()
+    # ── Slots: presets ────────────────────────────────────────────────
+
+    def _on_apn_preset(self, idx: int):
+        val = self._apn_preset.itemData(idx)
+        if val:
+            self._apn_input.setText(val)
+
+    def _on_smsc_preset(self, idx: int):
+        val = self._smsc_preset.itemData(idx)
+        if val:
+            self._smsc_input.setText(val)
+
+    # ── Slots: apply ──────────────────────────────────────────────────
 
     def _apply_apn(self):
-        apn  = self.apn_input.text().strip()
-        typ  = self.apn_type.currentText()
+        apn = self._apn_input.text().strip()
+        typ = self._apn_type.currentText()
         if not apn:
+            self._warn("Digite o APN.")
             return
-        self._run_worker(
+        self._run(
             lambda: self.modem.set_apn(apn, pdp_type=typ),
-            f"APN '{apn}' configurado com sucesso."
+            f"APN '{apn}' configurado."
         )
 
     def _apply_smsc(self):
-        smsc = self.smsc_input.text().strip()
-        if not smsc:
+        smsc = self._smsc_input.text().strip()
+        if not smsc.startswith("+"):
+            self._warn("SMSC inválido. Use formato internacional: +5511...")
             return
-        self._run_worker(
+        self._run(
             lambda: self.modem.set_smsc(smsc),
             f"SMSC '{smsc}' configurado."
         )
 
     def _apply_network_mode(self):
-        mode = self.net_mode.currentData()
-        self._run_worker(
+        mode = self._net_mode.currentData()
+        name = self._net_mode.currentText()
+        self._run(
             lambda: self.modem.set_network_mode(mode),
-            f"Modo de rede alterado para '{self.net_mode.currentText()}'."
+            f"Modo de rede: {name}."
         )
 
     def _apply_sms_storage(self):
-        storage = self.sms_storage.currentData()
-        self._run_worker(
+        storage = self._sms_storage.currentData()
+        self._run(
             lambda: self.modem.set_sms_storage(storage),
-            f"Storage SMS alterado para {storage}."
+            f"Storage SMS: {storage}."
         )
 
     def _send_test_sms(self):
-        dest = self.sms_dest.text().strip()
-        smsc = self.sms_smsc_override.text().strip()
-        if not dest or not smsc:
-            QMessageBox.warning(self, "Atenção", "Preencha Destino e SMSC PDU.")
+        dest = self._sms_dest.text().strip()
+        smsc = self._sms_smsc.text().strip()
+        if not dest:
+            self._warn("Digite o número de destino.")
             return
-        self._run_worker(
-            lambda: self.modem.send_sms(dest, "Teste TrackerConfig", smsc),
+        if not smsc.startswith("+"):
+            self._warn("Digite o SMSC PDU no formato +55...")
+            return
+        self._run(
+            lambda: self.modem.send_sms(dest, "Teste TrackerConfig OK", smsc),
             f"SMS enviado para {dest}."
         )
 
     def _rf_reset(self):
-        reply = QMessageBox.question(self, "Confirmar", "Executar reset de rádio (CFUN cycle)?")
-        if reply == QMessageBox.Yes:
-            self._run_worker(lambda: self.modem.reset_rf(), "Reset de rádio concluído.")
+        if QMessageBox.question(self, "Confirmar", "Executar reset de rádio?") == QMessageBox.Yes:
+            self._run(lambda: self.modem.reset_rf(), "Reset de rádio concluído.")
 
     def _factory_reset(self):
-        reply = QMessageBox.question(self, "Confirmar", "Executar factory reset (AT&F)?")
-        if reply == QMessageBox.Yes:
-            self._run_worker(lambda: self.modem.factory_reset(), "Factory reset concluído.")
+        if QMessageBox.question(self, "Confirmar", "Executar factory reset (AT&F)?") == QMessageBox.Yes:
+            self._run(lambda: self.modem.factory_reset(), "Factory reset concluído.")
+
+    # ── Worker ────────────────────────────────────────────────────────
+
+    def _run(self, fn, success_msg: str):
+        self._set_buttons_enabled(False)
+        self._status.setText("⏳  Executando...")
+
+        self._worker = WorkerThread(fn)
+
+        def on_done(ok: bool, err: str):
+            self._set_buttons_enabled(True)
+            if ok:
+                self._status.setText(f"✓  {success_msg}")
+                self._status.setStyleSheet("color:#155724; font-size:11px; padding:4px 12px;")
+            else:
+                self._status.setText(f"✗  Erro: {err}")
+                self._status.setStyleSheet("color:#721c24; font-size:11px; padding:4px 12px;")
+                QMessageBox.critical(self, "Erro", err)
+
+        self._worker.done.connect(on_done)
+        self._worker.start()
+
+    # ── Helpers ───────────────────────────────────────────────────────
+
+    def _set_buttons_enabled(self, enabled: bool):
+        for btn in self._action_btns:
+            btn.setEnabled(enabled)
+
+    def _warn(self, msg: str):
+        self._status.setText(f"⚠  {msg}")
+        self._status.setStyleSheet("color:#856404; font-size:11px; padding:4px 12px;")
+
+
+def _separator() -> QFrame:
+    line = QFrame()
+    line.setFrameShape(QFrame.HLine)
+    line.setStyleSheet("color:#dee2e6;")
+    return line
