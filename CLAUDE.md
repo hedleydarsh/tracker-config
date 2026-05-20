@@ -52,11 +52,28 @@ The app is split into two layers with no circular dependencies:
 
 **Port names**: Linux = `/dev/ttyUSB*`, Windows = `COM*`. `detector.list_candidate_ports()` handles both via `sys.platform`.
 
-## Planned phases
+## Building
 
-- **Phase 1** (current): Core architecture + all 4 tabs stubbed
-- **Phase 2**: Functional dashboard with live refresh
-- **Phase 3**: Config tab — APN, SMSC, network mode
-- **Phase 4**: Diagnostics tab — full sequence + issue cards
-- **Phase 5**: Console tab — history, quick buttons
-- **Phase 6**: Windows packaging + COM port support
+```bash
+# Linux / Windows — run on the target OS
+python3 build.py           # builds to dist/tracker-config/
+python3 build.py --clean   # clean build
+
+# Linux install
+sudo cp -r dist/tracker-config /opt/tracker-config
+sudo cp dist/tracker-config.sh /usr/local/bin/tracker-config
+
+# CI — GitHub Actions builds both platforms on every tag push (see .github/workflows/build.yml)
+# Tag format: git tag v0.1.0 && git push --tags
+```
+
+`tracker-config.spec` controls what PyInstaller includes. The `excludes` list strips unused PySide6 modules (~60% size reduction). Output is a `--onedir` bundle (faster startup than `--onefile`).
+
+## Phases completed
+
+- ✓ Phase 1 — Core architecture + all tabs
+- ✓ Phase 2 — Dashboard: live refresh, Badge, SignalBar, SMSC UTF-16 alert
+- ✓ Phase 3 — Config: APN/SMSC presets, validation, status feedback
+- ✓ Phase 4 — Diagnostics: 5-step sequence, severity cards, fix suggestions
+- ✓ Phase 5 — Console: dark theme, syntax colors, ↑↓ history, quick cmds
+- ✓ Phase 6 — Packaging: PyInstaller spec, build.py, GitHub Actions CI
